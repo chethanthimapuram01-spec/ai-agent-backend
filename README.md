@@ -6,9 +6,10 @@ A powerful, production-ready backend service for building AI agents with intelli
 
 - **Intelligent Agent System**: Automatically decides when to use tools vs direct responses
 - **Tool Registry**: Centralized management of reusable tools
+- **Document Upload & Processing**: Upload PDF/DOCX files with automatic text extraction
 - **Clean Architecture**: Clear separation between LLM logic and tool execution
 - **OpenAI Integration**: Ready-to-use LLM integration with placeholder mode
-- **RESTful API**: FastAPI-based endpoints for chat, agent, and tool management
+- **RESTful API**: FastAPI-based endpoints for chat, agent, tool, and document management
 - **Extensible**: Easy to add custom tools with standardized interface
 - **Production-Ready**: Comprehensive logging, error handling, and validation
 
@@ -139,6 +140,42 @@ Direct LLM chat without agent orchestration.
 - `POST /tools/{tool_name}/enable` - Enable a tool
 - `POST /tools/{tool_name}/disable` - Disable a tool
 
+### Document Management Endpoints
+
+#### `POST /upload-doc`
+Upload and process PDF or DOCX documents.
+
+**Request:**
+- Form data with file field (multipart/form-data)
+
+**Example:**
+```bash
+curl -X POST http://localhost:8000/upload-doc \
+  -F "file=@document.pdf"
+```
+
+**Response:**
+```json
+{
+  "file_id": "abc123",
+  "original_filename": "document.pdf",
+  "file_type": ".pdf",
+  "upload_time": "2026-04-23T10:30:00",
+  "extracted_text_length": 1542,
+  "file_size": 245760,
+  "message": "Document uploaded and processed successfully"
+}
+```
+
+#### Other Document Endpoints
+- `GET /documents` - List all documents
+- `GET /documents/{file_id}` - Get document details with text
+- `GET /documents/{file_id}/text` - Get extracted text only
+- `GET /documents/{file_id}/metadata` - Get metadata only
+- `DELETE /documents/{file_id}` - Delete document
+
+See [DOCUMENT_UPLOAD.md](DOCUMENT_UPLOAD.md) for detailed documentation.
+
 ### Health Check
 
 - `GET /health` - Service health status
@@ -195,6 +232,7 @@ The agent automatically discovers and uses your tool when appropriate.
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Detailed architecture documentation
 - **[TOOLS_GUIDE.md](TOOLS_GUIDE.md)** - Quick start guide for creating tools
+- **[DOCUMENT_UPLOAD.md](DOCUMENT_UPLOAD.md)** - Document upload and text extraction guide
 - **[API Docs](http://localhost:8000/docs)** - Interactive API documentation (when server is running)
 
 ## 💡 Examples
@@ -236,6 +274,17 @@ curl -X POST http://localhost:8000/chat \
 
 ```bash
 curl http://localhost:8000/tools
+```
+
+### Example 5: Upload and Process a Document
+
+```bash
+# Upload document
+curl -X POST http://localhost:8000/upload-doc \
+  -F "file=@document.pdf"
+
+# Response includes file_id, use it to get extracted text
+curl http://localhost:8000/documents/{file_id}/text
 ```
 
 ## 🔌 Built-in Tools
