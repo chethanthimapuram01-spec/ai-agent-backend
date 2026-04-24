@@ -53,5 +53,9 @@ uploads/
 *.pdf
 *.docx
 
+# Vector Database
+chroma_db/
+*.sqlite3
+
 # ChromaDB
 chroma_data/

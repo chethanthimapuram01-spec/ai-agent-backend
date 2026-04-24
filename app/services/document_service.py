@@ -10,6 +10,10 @@ import logging
 from pypdf import PdfReader
 from docx import Document
 
+# Import chunking and vector store services
+from app.services.embedding_service import embedding_service
+from app.services.vector_store_service import vector_store_service
+
 logger = logging.getLogger(__name__)
 
 
@@ -241,12 +245,25 @@ class DocumentService:
             "extracted_text": extracted_text
         }
         
+        # Create chunks and store in vector database
+        chunks = embedding_service.split_text_into_chunks(
+            text=extracted_text,
+            document_id=file_id,
+            source_filename=filename
+        )
+        
+        # Store chunks in vector database
+        vector_result = vector_store_service.add_chunks(chunks)
+        
         logger.info(f"Document processed successfully: {file_id}")
+        logger.info(f"Created {len(chunks)} chunks and stored in vector database")
         
         return {
             "file_id": file_id,
             "metadata": metadata.to_dict(),
-            "extracted_text": extracted_text
+            "extracted_text": extracted_text,
+            "chunks_created": len(chunks),
+            "vector_store_result": vector_result
         }
     
     def get_document(self, file_id: str) -> Optional[Dict[str, Any]]:
@@ -297,6 +314,10 @@ class DocumentService:
                 logger.info(f"Deleted file: {stored_filename}")
             except Exception as e:
                 logger.error(f"Error deleting file: {str(e)}")
+        
+        # Delete chunks from vector store
+        vector_delete_result = vector_store_service.delete_document_chunks(file_id)
+        logger.info(f"Deleted {vector_delete_result.get('chunks_deleted', 0)} chunks from vector store")
         
         # Remove from storage
         del self.documents[file_id]

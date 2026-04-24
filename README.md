@@ -7,9 +7,11 @@ A powerful, production-ready backend service for building AI agents with intelli
 - **Intelligent Agent System**: Automatically decides when to use tools vs direct responses
 - **Tool Registry**: Centralized management of reusable tools
 - **Document Upload & Processing**: Upload PDF/DOCX files with automatic text extraction
+- **RAG (Retrieval-Augmented Generation)**: Semantic search over documents with ChromaDB
+- **Vector Embeddings**: Automatic text chunking and embedding generation
 - **Clean Architecture**: Clear separation between LLM logic and tool execution
 - **OpenAI Integration**: Ready-to-use LLM integration with placeholder mode
-- **RESTful API**: FastAPI-based endpoints for chat, agent, tool, and document management
+- **RESTful API**: FastAPI-based endpoints for chat, agent, tool, document, and query management
 - **Extensible**: Easy to add custom tools with standardized interface
 - **Production-Ready**: Comprehensive logging, error handling, and validation
 
@@ -176,6 +178,53 @@ curl -X POST http://localhost:8000/upload-doc \
 
 See [DOCUMENT_UPLOAD.md](DOCUMENT_UPLOAD.md) for detailed documentation.
 
+### RAG & Semantic Search Endpoints
+
+#### `POST /query-doc`
+Semantic search over documents using ChromaDB.
+
+**Request:**
+```json
+{
+  "query": "What are the key terms?",
+  "document_id": "optional-filter",
+  "n_results": 5
+}
+```
+
+**Response:**
+```json
+{
+  "query": "What are the key terms?",
+  "results": [
+    {
+      "chunk_id": "abc_chunk_0",
+      "text": "Relevant text chunk...",
+      "document_id": "abc123",
+      "source_filename": "contract.pdf",
+      "chunk_index": 0,
+      "distance": 0.234
+    }
+  ],
+  "count": 5,
+  "success": true
+}
+```
+
+**Example:**
+```bash
+curl -X POST http://localhost:8000/query-doc \
+  -H "Content-Type: application/json" \
+  -d '{"query": "payment terms", "n_results": 3}'
+```
+
+#### Other Query Endpoints
+- `GET /query-doc/search?q=query` - Simple GET query
+- `GET /documents/{file_id}/chunks` - Get all chunks for a document
+- `GET /vector-store/stats` - Vector database statistics
+
+See [RAG_SYSTEM.md](RAG_SYSTEM.md) for detailed RAG documentation.
+
 ### Health Check
 
 - `GET /health` - Service health status
@@ -233,6 +282,7 @@ The agent automatically discovers and uses your tool when appropriate.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Detailed architecture documentation
 - **[TOOLS_GUIDE.md](TOOLS_GUIDE.md)** - Quick start guide for creating tools
 - **[DOCUMENT_UPLOAD.md](DOCUMENT_UPLOAD.md)** - Document upload and text extraction guide
+- **[RAG_SYSTEM.md](RAG_SYSTEM.md)** - RAG system and semantic search documentation
 - **[API Docs](http://localhost:8000/docs)** - Interactive API documentation (when server is running)
 
 ## 💡 Examples
@@ -285,6 +335,27 @@ curl -X POST http://localhost:8000/upload-doc \
 
 # Response includes file_id, use it to get extracted text
 curl http://localhost:8000/documents/{file_id}/text
+```
+
+### Example 6: Semantic Search with RAG
+
+```bash
+# Query across all documents
+curl -X POST http://localhost:8000/query-doc \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "key findings and conclusions",
+    "n_results": 5
+  }'
+
+# Query specific document
+curl -X POST http://localhost:8000/query-doc \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "payment terms",
+    "document_id": "abc123",
+    "n_results": 3
+  }'
 ```
 
 ## 🔌 Built-in Tools
