@@ -283,6 +283,8 @@ The agent automatically discovers and uses your tool when appropriate.
 - **[TOOLS_GUIDE.md](TOOLS_GUIDE.md)** - Quick start guide for creating tools
 - **[DOCUMENT_UPLOAD.md](DOCUMENT_UPLOAD.md)** - Document upload and text extraction guide
 - **[RAG_SYSTEM.md](RAG_SYSTEM.md)** - RAG system and semantic search documentation
+- **[API_CALLER_TOOL.md](API_CALLER_TOOL.md)** - API Caller Tool comprehensive guide
+- **[API_EXAMPLES.md](API_EXAMPLES.md)** - HTTP API usage examples and curl commands
 - **[API Docs](http://localhost:8000/docs)** - Interactive API documentation (when server is running)
 
 ## 💡 Examples
@@ -358,6 +360,34 @@ curl -X POST http://localhost:8000/query-doc \
   }'
 ```
 
+### Example 7: Using the API Caller Tool
+
+```bash
+# Get weather information
+curl -X POST http://localhost:8000/agent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is the weather in Hyderabad?",
+    "session_id": "test"
+  }'
+
+# Get cryptocurrency price
+curl -X POST http://localhost:8000/agent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What is the current price of Bitcoin?",
+    "session_id": "test"
+  }'
+
+# Fetch sample API data
+curl -X POST http://localhost:8000/agent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "Show me some sample posts from the API",
+    "session_id": "test"
+  }'
+```
+
 ## 🔌 Built-in Tools
 
 ### CalculatorTool
@@ -369,6 +399,31 @@ Performs basic arithmetic operations.
 Analyzes text statistics.
 - Returns: word count, character count, sentence count, etc.
 - Input: text
+
+### ApiCallerTool (NEW! 🎉)
+Fetch data from external REST APIs. Supports multiple endpoints:
+
+#### Weather API
+Get real-time weather information for any city.
+- **Input**: `endpoint="weather"`, `city="Hyderabad"`
+- **Returns**: temperature, humidity, weather description, wind speed, etc.
+- **Example**: "What's the weather in Hyderabad?"
+
+#### Cryptocurrency API
+Get current cryptocurrency prices.
+- **Input**: `endpoint="crypto"`, `crypto_id="bitcoin"`
+- **Supported coins**: bitcoin, ethereum, cardano, solana, dogecoin, etc.
+- **Returns**: prices in USD/EUR/INR, 24h change, market cap
+- **Example**: "What is the price of Bitcoin?"
+
+#### JSONPlaceholder API
+Fetch sample data for testing and prototyping.
+- **Input**: `endpoint="placeholder"`, `resource="posts"` (or users, comments, todos, albums)
+- **Optional**: `id="1"` for specific item
+- **Returns**: Sample JSON data
+- **Example**: "Show me some sample posts"
+
+**See [API_CALLER_TOOL.md](API_CALLER_TOOL.md) for detailed documentation and [API_EXAMPLES.md](API_EXAMPLES.md) for usage examples.**
 
 ## 🛠️ Development
 
@@ -385,20 +440,31 @@ ai-agent-backend/
 │   │   ├── health.py              # Health check endpoint
 │   │   ├── chat.py                # Chat endpoints
 │   │   ├── agent.py               # Agent endpoints
+│   │   ├── documents.py           # Document endpoints
+│   │   ├── query.py               # RAG query endpoints
 │   │   └── tools.py               # Tool management endpoints
 │   ├── services/
 │   │   ├── __init__.py
-│   │   └── chat_service.py        # LLM service
+│   │   ├── chat_service.py        # LLM service
+│   │   ├── document_service.py    # Document processing
+│   │   ├── embedding_service.py   # Text embeddings
+│   │   └── vector_store_service.py # Vector DB service
 │   ├── tools/
 │   │   ├── __init__.py
 │   │   ├── base_tool.py           # Tool interface
 │   │   ├── tool_registry.py       # Tool registry
-│   │   └── example_tools.py       # Example tools
+│   │   ├── example_tools.py       # Example tools
+│   │   └── api_caller_tool.py     # API caller tool (NEW!)
 │   ├── utils/
 │   │   └── __init__.py
 │   └── main.py                     # FastAPI app
 ├── ARCHITECTURE.md                 # Detailed docs
 ├── TOOLS_GUIDE.md                  # Tool creation guide
+├── DOCUMENT_UPLOAD.md              # Document upload guide
+├── RAG_SYSTEM.md                   # RAG documentation
+├── API_CALLER_TOOL.md              # API caller tool guide
+├── API_EXAMPLES.md                 # API examples
+├── test_api_caller.py              # API caller tests
 ├── requirements.txt
 └── README.md
 ```

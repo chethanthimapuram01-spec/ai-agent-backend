@@ -8,6 +8,7 @@ from app.routes.documents import router as documents_router
 from app.routes.query import router as query_router
 from app.tools.tool_registry import tool_registry
 from app.tools.example_tools import CalculatorTool, TextAnalyzerTool
+from app.tools.api_caller_tool import ApiCallerTool
 import logging
 
 # Configure logging
@@ -33,9 +34,11 @@ async def startup_event():
     # Register example tools
     calculator = CalculatorTool()
     text_analyzer = TextAnalyzerTool()
+    api_caller = ApiCallerTool()
     
     tool_registry.register(calculator)
     tool_registry.register(text_analyzer)
+    tool_registry.register(api_caller)
     
     logger.info(f"Registered {len(tool_registry.list_tool_names())} tools")
     logger.info("AI Agent Backend started successfully")
