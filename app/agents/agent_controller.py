@@ -18,14 +18,26 @@ class AgentDecision:
         tool_name: Optional[str] = None,
         tool_params: Optional[Dict[str, Any]] = None,
         reasoning: Optional[str] = None,
-        direct_response: Optional[str] = None
+        direct_response: Optional[str] = None,
+        query_type: Optional[str] = None,
+        is_multi_step: bool = False
     ):
         self.use_tool = use_tool
         self.tool_name = tool_name
         self.tool_params = tool_params or {}
         self.reasoning = reasoning
         self.direct_response = direct_response
+        self.query_type = query_type  # direct, document, api, multi-step
+        self.is_multi_step = is_multi_step
         self.timestamp = datetime.utcnow().isoformat()
+
+
+class QueryType:
+    """Constants for query type classification"""
+    DIRECT = "direct"
+    DOCUMENT = "document"
+    API = "api"
+    MULTI_STEP = "multi-step"
 
 
 class AgentController:
@@ -77,13 +89,17 @@ class AgentController:
             # Log the decision
             self._log_decision(session_id, query, decision)
             
-            # Step 2: Execute based on decision
-            if decision.use_tool:
+            # Step 2: Check if this is a multi-step task
+            if decision.is_multi_step and decision.use_tool:
+                logger.info("Multi-step task detected - executing orchestrated workflow")
+                result = await self._execute_multi_step(query, decision, session_id)
+            # Step 3: Execute based on decision
+            elif decision.use_tool:
                 result = await self._execute_with_tool(query, decision, session_id)
             else:
                 result = await self._execute_direct_response(query, decision, session_id)
             
-            # Step 3: Record execution
+            # Step 4: Record execution
             execution_record = {
                 "session_id": session_id,
                 "query": query,
@@ -178,17 +194,39 @@ class AgentController:
         return "\n".join(descriptions)
     
     def _build_decision_prompt(self, query: str, tool_descriptions: str) -> str:
-        """Build prompt for LLM to make decision"""
-        return f"""Analyze the following user query and decide whether to use a tool or respond directly.
+        """Build prompt for LLM to make intelligent routing decision"""
+        return f"""You are an intelligent routing agent. Analyze the user query and determine the best action.
 
-User Query: {query}
+User Query: "{query}"
 
 Available Tools:
 {tool_descriptions}
 
-Instructions:
-1. If the query can be answered directly without tools, respond with: DIRECT: [your response]
-2. If a tool should be used, respond with: TOOL: [tool_name] | PARAMS: {{"param": "value"}} | REASON: [why this tool]
+Query Classification Guidelines:
+1. DIRECT RESPONSE - Simple questions that don't require external data or documents
+   Examples: "What is AI?", "Explain machine learning", "Hello", "How are you?"
+   
+2. DOCUMENT QUESTION - Questions about uploaded documents or content
+   Examples: "Summarize the contract", "What does the document say about pricing?", "Find information about deadlines in the uploaded files"
+   Tool: document_query
+   
+3. API REQUEST - Questions requiring external API data
+   Examples: "Get weather for London", "What's the Bitcoin price?", "Fetch user data"
+   Tool: api_caller
+   
+4. MULTI-STEP TASK - Complex queries requiring multiple operations
+   Examples: "Get weather and summarize it in a document", "Compare contract terms with weather impact", "Fetch data and analyze it"
+   Note: For multi-step tasks, identify the FIRST tool to use
+
+Response Format:
+- Direct response: DIRECT: [your helpful response]
+- Tool usage: TOOL: [tool_name] | PARAMS: {{"param1": "value1", "param2": "value2"}} | REASON: [brief explanation]
+
+Important:
+- Match tool parameters exactly to the tool's input schema
+- For document queries, use tool "document_query" with parameter "query"
+- For API calls, use tool "api_caller" with parameters "endpoint" and specific endpoint params
+- Be precise with parameter names and values
 
 Decision:"""
     
@@ -197,7 +235,7 @@ Decision:"""
         response: str,
         available_tools: Dict[str, Any]
     ) -> AgentDecision:
-        """Parse LLM decision response"""
+        """Parse LLM decision response and classify query type"""
         response = response.strip()
         
         if response.startswith("DIRECT:"):
@@ -206,7 +244,8 @@ Decision:"""
             return AgentDecision(
                 use_tool=False,
                 direct_response=direct_response,
-                reasoning="Query can be answered directly"
+                reasoning="Query can be answered directly",
+                query_type=QueryType.DIRECT
             )
         
         elif response.startswith("TOOL:"):
@@ -231,29 +270,58 @@ Decision:"""
                     logger.warning(f"Tool '{tool_name}' not found. Using direct response.")
                     return AgentDecision(
                         use_tool=False,
-                        reasoning=f"Requested tool '{tool_name}' not available"
+                        reasoning=f"Requested tool '{tool_name}' not available",
+                        query_type=QueryType.DIRECT
                     )
+                
+                # Classify query type based on tool selection
+                query_type = self._classify_query_type(tool_name, reasoning)
+                
+                # Check if multi-step based on reasoning keywords
+                is_multi_step = self._is_multi_step_query(reasoning)
                 
                 return AgentDecision(
                     use_tool=True,
                     tool_name=tool_name,
                     tool_params=params,
-                    reasoning=reasoning
+                    reasoning=reasoning,
+                    query_type=query_type,
+                    is_multi_step=is_multi_step
                 )
                 
             except Exception as e:
                 logger.warning(f"Error parsing tool decision: {str(e)}")
                 return AgentDecision(
                     use_tool=False,
-                    reasoning=f"Could not parse tool decision: {str(e)}"
+                    reasoning=f"Could not parse tool decision: {str(e)}",
+                    query_type=QueryType.DIRECT
                 )
         
         # Default to direct response
         return AgentDecision(
             use_tool=False,
             direct_response=response,
-            reasoning="Default to direct response"
+            reasoning="Default to direct response",
+            query_type=QueryType.DIRECT
         )
+    
+    def _classify_query_type(self, tool_name: str, reasoning: str) -> str:
+        """Classify query type based on tool selection"""
+        if tool_name == "document_query":
+            return QueryType.DOCUMENT
+        elif tool_name == "api_caller":
+            return QueryType.API
+        else:
+            return QueryType.DIRECT
+    
+    def _is_multi_step_query(self, reasoning: str) -> bool:
+        """Determine if query requires multiple steps"""
+        multi_step_keywords = [
+            "multi-step", "multiple", "then", "after", "combine",
+            "compare", "both", "and then", "followed by"
+        ]
+        reasoning_lower = reasoning.lower()
+        return any(keyword in reasoning_lower for keyword in multi_step_keywords)
     
     async def _execute_with_tool(
         self,
@@ -318,6 +386,103 @@ Decision:"""
             "success": True
         }
     
+    async def _execute_multi_step(
+        self,
+        query: str,
+        decision: AgentDecision,
+        session_id: str
+    ) -> Dict[str, Any]:
+        """
+        Execute multi-step workflow
+        
+        This orchestrates complex queries that require multiple tool calls
+        or a combination of tools and processing.
+        """
+        logger.info(f"Executing multi-step workflow for query: {query[:50]}...")
+        
+        steps_executed = []
+        accumulated_context = {}
+        
+        try:
+            # Step 1: Execute the first tool (already decided)
+            logger.info(f"Step 1: Executing {decision.tool_name}")
+            first_result = await self._execute_with_tool(query, decision, session_id)
+            steps_executed.append({
+                "step": 1,
+                "tool": decision.tool_name,
+                "success": first_result["success"],
+                "result": first_result.get("tool_results")
+            })
+            
+            if first_result.get("tool_results", {}).get("result"):
+                accumulated_context["step1_result"] = first_result["tool_results"]["result"]
+            
+            # Step 2: Determine if additional steps are needed
+            # For now, we'll synthesize the result with LLM using accumulated context
+            synthesis_prompt = self._build_synthesis_prompt(
+                query, 
+                steps_executed, 
+                accumulated_context
+            )
+            
+            synthesis_response = await chat_service.process_message(
+                message=synthesis_prompt,
+                session_id=session_id
+            )
+            
+            final_response = synthesis_response.get("reply", first_result["response"])
+            
+            return {
+                "response": final_response,
+                "decision": decision,
+                "tool_results": {
+                    "multi_step": True,
+                    "steps": steps_executed,
+                    "accumulated_context": accumulated_context
+                },
+                "session_id": session_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "success": True
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in multi-step execution: {str(e)}", exc_info=True)
+            return {
+                "response": f"Multi-step execution failed: {str(e)}",
+                "decision": decision,
+                "tool_results": {"steps": steps_executed, "error": str(e)},
+                "session_id": session_id,
+                "timestamp": datetime.utcnow().isoformat(),
+                "success": False
+            }
+    
+    def _build_synthesis_prompt(
+        self,
+        original_query: str,
+        steps_executed: List[Dict[str, Any]],
+        accumulated_context: Dict[str, Any]
+    ) -> str:
+        """Build prompt for synthesizing multi-step results"""
+        context_str = json.dumps(accumulated_context, indent=2)
+        
+        return f"""You are helping to answer a complex multi-step query.
+
+Original Query: "{original_query}"
+
+Steps Executed and Results:
+{json.dumps(steps_executed, indent=2)}
+
+Accumulated Context:
+{context_str}
+
+Instructions:
+- Synthesize the results from all steps into a coherent answer
+- Address the original query completely
+- Be clear and concise
+- Cite specific data from the results
+
+Final Answer:"""
+    
     def _format_tool_response(
         self,
         query: str,
@@ -327,20 +492,53 @@ Decision:"""
         """Format tool execution result into user-friendly response"""
         result_data = tool_result.get("result", {})
         
-        # Basic formatting - can be enhanced with LLM
-        return (
-            f"I used the '{decision.tool_name}' tool to help with your request.\n\n"
-            f"Result: {json.dumps(result_data, indent=2)}"
-        )
+        # Format based on query type
+        if decision.query_type == QueryType.DOCUMENT:
+            return self._format_document_response(result_data)
+        elif decision.query_type == QueryType.API:
+            return self._format_api_response(result_data, decision.tool_name)
+        else:
+            # Generic formatting
+            return (
+                f"I used the '{decision.tool_name}' tool to help with your request.\n\n"
+                f"Result: {json.dumps(result_data, indent=2)}"
+            )
+    
+    def _format_document_response(self, result_data: Dict[str, Any]) -> str:
+        """Format document query response"""
+        answer = result_data.get("answer", "No answer generated")
+        sources = result_data.get("sources", [])
+        
+        response = f"{answer}\n\n"
+        
+        if sources:
+            response += "Sources:\n"
+            for idx, source in enumerate(sources[:3], 1):  # Limit to top 3 sources
+                filename = source.get("filename", "Unknown")
+                preview = source.get("text_preview", "")
+                response += f"{idx}. {filename}\n   \"{preview[:100]}...\"\n\n"
+        
+        return response.strip()
+    
+    def _format_api_response(self, result_data: Dict[str, Any], tool_name: str) -> str:
+        """Format API response"""
+        # Format API responses in a more readable way
+        if isinstance(result_data, dict):
+            formatted = json.dumps(result_data, indent=2)
+            return f"API Response:\n```json\n{formatted}\n```"
+        else:
+            return f"API Response: {result_data}"
     
     def _log_decision(self, session_id: str, query: str, decision: AgentDecision):
-        """Log agent decision"""
+        """Log agent decision with query type"""
         log_entry = {
             "timestamp": decision.timestamp,
             "session_id": session_id,
             "query": query[:100],
             "use_tool": decision.use_tool,
             "tool_name": decision.tool_name,
+            "query_type": decision.query_type,
+            "is_multi_step": decision.is_multi_step,
             "reasoning": decision.reasoning
         }
         logger.info(f"Agent Decision: {json.dumps(log_entry, indent=2)}")
