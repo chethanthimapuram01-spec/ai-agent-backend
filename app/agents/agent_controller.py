@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 from app.tools.tool_registry import tool_registry
 from app.services.chat_service import chat_service
+from app.agents.workflow_executor import workflow_executor
 
 logger = logging.getLogger(__name__)
 
@@ -393,95 +394,50 @@ Decision:"""
         session_id: str
     ) -> Dict[str, Any]:
         """
-        Execute multi-step workflow
+        Execute multi-step workflow using WorkflowExecutor
         
-        This orchestrates complex queries that require multiple tool calls
-        or a combination of tools and processing.
+        Delegates to the comprehensive WorkflowExecutor for:
+        - Task analysis
+        - Workflow planning
+        - Sequential step execution
+        - Intermediate data passing
+        - Final result synthesis
         """
-        logger.info(f"Executing multi-step workflow for query: {query[:50]}...")
+        logger.info(f"Delegating to WorkflowExecutor for query: {query[:50]}...")
         
-        steps_executed = []
-        accumulated_context = {}
+        # Use WorkflowExecutor for comprehensive workflow management
+        workflow_result = await workflow_executor.execute_workflow(
+            query=query,
+            session_id=session_id,
+            context={"initial_decision": decision}
+        )
         
-        try:
-            # Step 1: Execute the first tool (already decided)
-            logger.info(f"Step 1: Executing {decision.tool_name}")
-            first_result = await self._execute_with_tool(query, decision, session_id)
-            steps_executed.append({
-                "step": 1,
-                "tool": decision.tool_name,
-                "success": first_result["success"],
-                "result": first_result.get("tool_results")
-            })
-            
-            if first_result.get("tool_results", {}).get("result"):
-                accumulated_context["step1_result"] = first_result["tool_results"]["result"]
-            
-            # Step 2: Determine if additional steps are needed
-            # For now, we'll synthesize the result with LLM using accumulated context
-            synthesis_prompt = self._build_synthesis_prompt(
-                query, 
-                steps_executed, 
-                accumulated_context
-            )
-            
-            synthesis_response = await chat_service.process_message(
-                message=synthesis_prompt,
-                session_id=session_id
-            )
-            
-            final_response = synthesis_response.get("reply", first_result["response"])
-            
+        if workflow_result["success"]:
             return {
-                "response": final_response,
+                "response": workflow_result["response"],
                 "decision": decision,
                 "tool_results": {
-                    "multi_step": True,
-                    "steps": steps_executed,
-                    "accumulated_context": accumulated_context
+                    "workflow_execution": True,
+                    "workflow_id": workflow_result["workflow_id"],
+                    "workflow_state": workflow_result["workflow_state"]
                 },
                 "session_id": session_id,
                 "timestamp": datetime.utcnow().isoformat(),
                 "success": True
             }
-            
-        except Exception as e:
-            logger.error(f"Error in multi-step execution: {str(e)}", exc_info=True)
+        else:
             return {
-                "response": f"Multi-step execution failed: {str(e)}",
+                "response": f"Workflow execution failed: {workflow_result.get('error', 'Unknown error')}",
                 "decision": decision,
-                "tool_results": {"steps": steps_executed, "error": str(e)},
+                "tool_results": {
+                    "workflow_execution": False,
+                    "error": workflow_result.get("error"),
+                    "workflow_state": workflow_result.get("workflow_state")
+                },
                 "session_id": session_id,
                 "timestamp": datetime.utcnow().isoformat(),
                 "success": False
             }
-    
-    def _build_synthesis_prompt(
-        self,
-        original_query: str,
-        steps_executed: List[Dict[str, Any]],
-        accumulated_context: Dict[str, Any]
-    ) -> str:
-        """Build prompt for synthesizing multi-step results"""
-        context_str = json.dumps(accumulated_context, indent=2)
-        
-        return f"""You are helping to answer a complex multi-step query.
-
-Original Query: "{original_query}"
-
-Steps Executed and Results:
-{json.dumps(steps_executed, indent=2)}
-
-Accumulated Context:
-{context_str}
-
-Instructions:
-- Synthesize the results from all steps into a coherent answer
-- Address the original query completely
-- Be clear and concise
-- Cite specific data from the results
-
-Final Answer:"""
     
     def _format_tool_response(
         self,
