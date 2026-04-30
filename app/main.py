@@ -8,6 +8,7 @@ from app.routes.tools import router as tools_router
 from app.routes.documents import router as documents_router
 from app.routes.query import router as query_router
 from app.routes.workflow import router as workflow_router
+from app.routes.session import router as session_router
 from app.tools.tool_registry import tool_registry
 from app.tools.example_tools import CalculatorTool, TextAnalyzerTool
 from app.tools.api_caller_tool import ApiCallerTool
@@ -57,6 +58,7 @@ app.include_router(tools_router, tags=["Tools"])
 app.include_router(documents_router, tags=["Documents"])
 app.include_router(query_router, tags=["Query"])
 app.include_router(workflow_router, tags=["Workflow"])
+app.include_router(session_router, tags=["Session"])
 
 
 @app.get("/")

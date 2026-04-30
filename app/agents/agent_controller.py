@@ -6,6 +6,7 @@ from datetime import datetime
 from app.tools.tool_registry import tool_registry
 from app.services.chat_service import chat_service
 from app.agents.workflow_executor import workflow_executor
+from app.services.session_store import session_store
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +85,11 @@ class AgentController:
         logger.info(f"Processing query for session {session_id}: {query[:50]}...")
         
         try:
+            # Store user message in session
+            session_store.add_user_message(session_id, query)
+            
             # Step 1: Analyze query and decide on action
-            decision = await self._make_decision(query, context)
+            decision = await self._make_decision(query, session_id, context)
             
             # Log the decision
             self._log_decision(session_id, query, decision)
@@ -99,6 +103,17 @@ class AgentController:
                 result = await self._execute_with_tool(query, decision, session_id)
             else:
                 result = await self._execute_direct_response(query, decision, session_id)
+            
+            # Store assistant response in session
+            session_store.add_assistant_message(
+                session_id,
+                result["response"],
+                metadata={
+                    "query_type": decision.query_type,
+                    "used_tool": decision.use_tool,
+                    "tool_name": decision.tool_name
+                }
+            )
             
             # Step 4: Record execution
             execution_record = {
@@ -132,6 +147,7 @@ class AgentController:
     async def _make_decision(
         self,
         query: str,
+        session_id: str,
         context: Optional[Dict[str, Any]] = None
     ) -> AgentDecision:
         """
@@ -139,6 +155,7 @@ class AgentController:
         
         Args:
             query: User query
+            session_id: Session identifier for retrieving history
             context: Optional context
             
         Returns:
@@ -155,15 +172,19 @@ class AgentController:
                 reasoning="No tools are currently available"
             )
         
-        # Build decision prompt with tool information
-        tool_descriptions = self._build_tool_descriptions(available_tools)
-        decision_prompt = self._build_decision_prompt(query, tool_descriptions)
+        # Get recent conversation context
+        recent_context = self._get_recent_context(session_id, limit=5)
         
-        # Use LLM to make decision
+        # Build decision prompt with tool information and context
+        tool_descriptions = self._build_tool_descriptions(available_tools)
+        decision_prompt = self._build_decision_prompt(query, tool_descriptions, recent_context)
+        
+        # Use LLM to make decision (without adding to main session)
         try:
             llm_response = await chat_service.process_message(
                 message=decision_prompt,
-                session_id="agent_decision"
+                session_id=f"agent_decision_{session_id}",
+                use_history=False  # Don't use history for decision-making
             )
             
             # Parse LLM response to extract decision
@@ -194,11 +215,20 @@ class AgentController:
             )
         return "\n".join(descriptions)
     
-    def _build_decision_prompt(self, query: str, tool_descriptions: str) -> str:
-        """Build prompt for LLM to make intelligent routing decision"""
+    def _build_decision_prompt(self, query: str, tool_descriptions: str, recent_context: str = "") -> str:
+        """Build prompt for LLM to make intelligent routing decision with conversation context"""
+        
+        context_section = ""
+        if recent_context:
+            context_section = f"""
+Recent Conversation Context:
+{recent_context}
+
+"""
+        
         return f"""You are an intelligent routing agent. Analyze the user query and determine the best action.
 
-User Query: "{query}"
+{context_section}User Query: "{query}"
 
 Available Tools:
 {tool_descriptions}
@@ -346,6 +376,15 @@ Decision:"""
         
         # Execute tool
         tool_result = await tool.safe_execute(**decision.tool_params)
+        
+        # Store tool execution in session
+        session_store.add_tool_output(
+            session_id=session_id,
+            tool_name=decision.tool_name,
+            tool_params=decision.tool_params,
+            result=tool_result,
+            success=tool_result["success"]
+        )
         
         # Generate response based on tool result
         if tool_result["success"]:
@@ -498,6 +537,33 @@ Decision:"""
             "reasoning": decision.reasoning
         }
         logger.info(f"Agent Decision: {json.dumps(log_entry, indent=2)}")
+    
+    def _get_recent_context(self, session_id: str, limit: int = 5) -> str:
+        """
+        Get recent conversation context as formatted string
+        
+        Args:
+            session_id: Session identifier
+            limit: Number of recent messages to include
+            
+        Returns:
+            Formatted context string
+        """
+        history = session_store.get_conversation_history(session_id, limit=limit)
+        
+        if not history:
+            return ""
+        
+        context_lines = []
+        for msg in history:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            # Truncate long messages
+            if len(content) > 150:
+                content = content[:150] + "..."
+            context_lines.append(f"{role.upper()}: {content}")
+        
+        return "\n".join(context_lines)
     
     def get_execution_history(
         self,
