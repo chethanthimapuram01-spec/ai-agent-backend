@@ -1,12 +1,14 @@
 """Workflow execution engine for multi-step tasks"""
 import json
 import logging
+import time
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from enum import Enum
 from dataclasses import dataclass, field, asdict
 from app.tools.tool_registry import tool_registry
 from app.services.chat_service import chat_service
+from app.services.trace_logger import trace_logger, WorkflowTrace, TraceStatus
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +350,23 @@ Plan:"""
             step.status = StepStatus.IN_PROGRESS
             step.started_at = datetime.utcnow().isoformat()
             
+            # Record start time for execution tracking
+            start_time = time.time()
+            
+            # Log trace - step started
+            trace_logger.log_trace(WorkflowTrace(
+                task_id=workflow_state.workflow_id,
+                session_id=workflow_state.session_id,
+                step_number=step.step_id,
+                selected_tool=step.tool_name,
+                input_data={
+                    "description": step.description,
+                    "tool_params": step.tool_params
+                },
+                output_data=None,
+                status=TraceStatus.IN_PROGRESS
+            ))
+            
             try:
                 # Check dependencies
                 if step.depends_on:
@@ -359,6 +378,9 @@ Plan:"""
                 # Execute the step
                 result = await self._execute_single_step(step, workflow_state)
                 
+                # Calculate execution time
+                execution_time_ms = (time.time() - start_time) * 1000
+                
                 # Store result
                 step.result = result
                 step.status = StepStatus.COMPLETED
@@ -367,13 +389,47 @@ Plan:"""
                 # Store intermediate data for next steps
                 workflow_state.add_intermediate_data(f"step_{step.step_id}_result", result)
                 
-                logger.info(f"Step {step.step_id} completed successfully")
+                # Log trace - step completed
+                trace_logger.log_trace(WorkflowTrace(
+                    task_id=workflow_state.workflow_id,
+                    session_id=workflow_state.session_id,
+                    step_number=step.step_id,
+                    selected_tool=step.tool_name,
+                    input_data={
+                        "description": step.description,
+                        "tool_params": step.tool_params
+                    },
+                    output_data=result,
+                    status=TraceStatus.COMPLETED,
+                    execution_time_ms=execution_time_ms
+                ))
+                
+                logger.info(f"Step {step.step_id} completed successfully in {execution_time_ms:.2f}ms")
                 
             except Exception as e:
+                # Calculate execution time even for failed steps
+                execution_time_ms = (time.time() - start_time) * 1000
+                
                 logger.error(f"Step {step.step_id} failed: {str(e)}", exc_info=True)
                 step.status = StepStatus.FAILED
                 step.error = str(e)
                 step.completed_at = datetime.utcnow().isoformat()
+                
+                # Log trace - step failed
+                trace_logger.log_trace(WorkflowTrace(
+                    task_id=workflow_state.workflow_id,
+                    session_id=workflow_state.session_id,
+                    step_number=step.step_id,
+                    selected_tool=step.tool_name,
+                    input_data={
+                        "description": step.description,
+                        "tool_params": step.tool_params
+                    },
+                    output_data=None,
+                    status=TraceStatus.FAILED,
+                    execution_time_ms=execution_time_ms,
+                    error_message=str(e)
+                ))
                 
                 # Continue with other steps or fail workflow
                 # For now, we'll continue but log the error
