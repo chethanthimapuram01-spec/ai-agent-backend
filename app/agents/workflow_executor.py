@@ -6,9 +6,16 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 from enum import Enum
 from dataclasses import dataclass, field, asdict
+from pydantic import ValidationError
 from app.tools.tool_registry import tool_registry
 from app.services.chat_service import chat_service
 from app.services.trace_logger import trace_logger, WorkflowTrace, TraceStatus
+from app.utils.prompts import (
+    PromptTemplates,
+    OutputParser,
+    WorkflowPlanOutput,
+    FinalAnswerOutput
+)
 
 logger = logging.getLogger(__name__)
 
@@ -232,68 +239,77 @@ Analysis:"""
         logger.info(f"Task analysis completed: {analysis_response.get('reply', '')[:100]}...")
     
     async def _create_plan(self, workflow_state: WorkflowState):
-        """Create a step-by-step execution plan"""
+        """Create a step-by-step execution plan using structured prompts"""
         logger.info(f"Creating execution plan for workflow {workflow_state.workflow_id}")
         
         available_tools = self.tool_registry.get_enabled_tools()
-        tool_descriptions = self._build_tool_descriptions(available_tools)
+        tool_names = list(available_tools.keys())
         task_analysis = workflow_state.get_intermediate_data("task_analysis")
         
-        planning_prompt = f"""Create a step-by-step execution plan for this query.
-
-Query: "{workflow_state.query}"
-
-Task Analysis:
-{task_analysis}
-
-Available Tools:
-{tool_descriptions}
-
-Create a sequential plan with these requirements:
-1. Each step should be atomic and clear
-2. Specify which tool to use (if any)
-3. Specify tool parameters
-4. Note dependencies on previous steps
-5. Keep it simple - aim for 2-5 steps
-
-Format your response as JSON:
-{{
-  "steps": [
-    {{
-      "step_id": 1,
-      "description": "Retrieve document content",
-      "tool_name": "document_query",
-      "tool_params": {{"query": "..."}},
-      "depends_on": []
-    }},
-    {{
-      "step_id": 2,
-      "description": "Call external API",
-      "tool_name": "api_caller",
-      "tool_params": {{"endpoint": "..."}},
-      "depends_on": [1]
-    }}
-  ]
-}}
-
-Plan:"""
+        # Use structured prompt template
+        planning_prompt = PromptTemplates.get_workflow_planning_prompt(
+            query=workflow_state.query,
+            available_tools=tool_names,
+            context=task_analysis
+        )
         
         plan_response = await chat_service.process_message(
             message=planning_prompt,
             session_id=f"{workflow_state.session_id}_planning"
         )
         
-        # Parse the plan
-        plan_text = plan_response.get("reply", "")
-        workflow_state.add_intermediate_data("execution_plan", plan_text)
+        # Parse and validate the plan using Pydantic
+        try:
+            validated_plan = OutputParser.validate_workflow_plan(plan_response.get("reply", ""))
+            
+            # Store plan metadata
+            workflow_state.add_intermediate_data("execution_plan", {
+                "task_analysis": validated_plan.task_analysis,
+                "required_capabilities": validated_plan.required_capabilities,
+                "expected_challenges": validated_plan.expected_challenges,
+                "success_criteria": validated_plan.success_criteria
+            })
+            
+            # Convert validated steps to WorkflowStep objects
+            steps = self._convert_to_workflow_steps(validated_plan.steps)
+            workflow_state.steps = steps
+            
+            logger.info(f"Created plan with {len(steps)} steps")
+            for step in steps:
+                logger.info(f"  Step {step.step_id}: {step.description} (Tool: {step.tool_name})")
+                
+        except (ValidationError, ValueError) as e:
+            logger.warning(f"Plan validation failed: {e}. Using fallback parser.")
+            # Fallback to legacy parsing
+            plan_text = plan_response.get("reply", "")
+            workflow_state.add_intermediate_data("execution_plan", plan_text)
+            steps = self._parse_plan(plan_text)
+            workflow_state.steps = steps
+            logger.info(f"Created plan with {len(steps)} steps (using fallback parser)")
+    
+    def _convert_to_workflow_steps(self, steps_data: List[Dict[str, Any]]) -> List[WorkflowStep]:
+        """
+        Convert validated plan steps to WorkflowStep objects
         
-        # Extract steps from the plan
-        steps = self._parse_plan(plan_text)
-        workflow_state.steps = steps
+        Args:
+            steps_data: List of step dictionaries from validated plan
+            
+        Returns:
+            List of WorkflowStep objects
+        """
+        workflow_steps = []
         
-        logger.info(f"Created plan with {len(steps)} steps")
-        for step in steps:
-            logger.info(f"  Step {step.step_id}: {step.description} (Tool: {step.tool_name})")
+        for step_data in steps_data:
+            workflow_step = WorkflowStep(
+                step_id=step_data.get("step_id", len(workflow_steps) + 1),
+                description=step_data.get("description", "Unnamed step"),
+                tool_name=step_data.get("tool_name"),
+                tool_params=step_data.get("tool_params", {}),
+                depends_on=step_data.get("depends_on", [])
+            )
+            workflow_steps.append(workflow_step)
+        
+        return workflow_steps
     
     def _parse_plan(self, plan_text: str) -> List[WorkflowStep]:
         """Parse plan text into WorkflowStep objects"""
@@ -489,7 +505,7 @@ Plan:"""
         return resolved
     
     async def _generate_final_answer(self, workflow_state: WorkflowState):
-        """Generate final answer by synthesizing all step results"""
+        """Generate final answer by synthesizing all step results using structured prompts"""
         logger.info(f"Generating final answer for workflow {workflow_state.workflow_id}")
         
         # Collect all step results
@@ -498,37 +514,49 @@ Plan:"""
             step_results.append({
                 "step_id": step.step_id,
                 "description": step.description,
+                "tool_name": step.tool_name,
                 "status": step.status.value,
                 "result": step.result,
                 "error": step.error
             })
         
-        synthesis_prompt = f"""Synthesize the results from a multi-step workflow into a coherent final answer.
-
-Original Query: "{workflow_state.query}"
-
-Workflow Steps and Results:
-{json.dumps(step_results, indent=2)}
-
-Intermediate Data:
-{json.dumps(workflow_state.intermediate_data, indent=2, default=str)}
-
-Instructions:
-- Provide a clear, comprehensive answer to the original query
-- Incorporate findings from all completed steps
-- If any steps failed, mention it but provide the best answer possible
-- Be concise but thorough
-- Cite specific data from the results
-
-Final Answer:"""
+        # Use structured prompt template
+        synthesis_prompt = PromptTemplates.get_final_answer_prompt(
+            query=workflow_state.query,
+            workflow_results=step_results,
+            context=None  # Could add session context here if needed
+        )
         
         synthesis_response = await chat_service.process_message(
             message=synthesis_prompt,
             session_id=f"{workflow_state.session_id}_synthesis"
         )
         
-        workflow_state.final_result = synthesis_response.get("reply", "Unable to generate final answer")
-        logger.info(f"Final answer generated: {workflow_state.final_result[:100]}...")
+        # Parse and validate the final answer
+        try:
+            validated_answer = OutputParser.validate_final_answer(synthesis_response.get("reply", ""))
+            
+            # Store the comprehensive answer with metadata
+            workflow_state.final_result = validated_answer.answer
+            
+            # Store additional metadata
+            workflow_state.add_intermediate_data("final_answer_metadata", {
+                "sources": validated_answer.sources or [],
+                "confidence": validated_answer.confidence,
+                "additional_context": validated_answer.additional_context,
+                "follow_up_suggestions": validated_answer.follow_up_suggestions or []
+            })
+            
+            logger.info(
+                f"Final answer generated (confidence: {validated_answer.confidence}): "
+                f"{workflow_state.final_result[:100]}..."
+            )
+            
+        except (ValidationError, ValueError) as e:
+            logger.warning(f"Final answer validation failed: {e}. Using raw response.")
+            # Fallback to raw response
+            workflow_state.final_result = synthesis_response.get("reply", "Unable to generate final answer")
+            logger.info(f"Final answer generated (fallback): {workflow_state.final_result[:100]}...")
     
     def _build_tool_descriptions(self, tools: Dict[str, Any]) -> str:
         """Build formatted description of available tools"""

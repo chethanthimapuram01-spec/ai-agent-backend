@@ -3,10 +3,16 @@ import json
 import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+from pydantic import ValidationError
 from app.tools.tool_registry import tool_registry
 from app.services.chat_service import chat_service
 from app.agents.workflow_executor import workflow_executor
 from app.services.session_store import session_store
+from app.utils.prompts import (
+    PromptTemplates,
+    OutputParser,
+    ToolSelectionOutput
+)
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +159,8 @@ class AgentController:
         """
         Analyze query and decide whether to use tools or respond directly
         
+        Uses structured prompts and Pydantic validation for reliable output parsing.
+        
         Args:
             query: User query
             session_id: Session identifier for retrieving history
@@ -169,15 +177,20 @@ class AgentController:
             logger.info("No tools available - will respond directly")
             return AgentDecision(
                 use_tool=False,
-                reasoning="No tools are currently available"
+                reasoning="No tools are currently available",
+                query_type=QueryType.DIRECT
             )
         
         # Get recent conversation context
         recent_context = self._get_recent_context(session_id, limit=5)
         
-        # Build decision prompt with tool information and context
-        tool_descriptions = self._build_tool_descriptions(available_tools)
-        decision_prompt = self._build_decision_prompt(query, tool_descriptions, recent_context)
+        # Build decision prompt using template
+        tool_names = list(available_tools.keys())
+        decision_prompt = PromptTemplates.get_tool_selection_prompt(
+            query=query,
+            available_tools=tool_names,
+            context=recent_context if recent_context else None
+        )
         
         # Use LLM to make decision (without adding to main session)
         try:
@@ -187,15 +200,27 @@ class AgentController:
                 use_history=False  # Don't use history for decision-making
             )
             
-            # Parse LLM response to extract decision
-            decision = self._parse_decision_response(llm_response["reply"], available_tools)
-            
-            logger.info(
-                f"Decision made - Use tool: {decision.use_tool}, "
-                f"Tool: {decision.tool_name if decision.use_tool else 'N/A'}"
-            )
-            
-            return decision
+            # Parse and validate LLM response using Pydantic
+            try:
+                validated_output = OutputParser.validate_tool_selection(llm_response["reply"])
+                decision = self._convert_to_agent_decision(validated_output)
+                
+                logger.info(
+                    f"Decision made - Query type: {decision.query_type}, "
+                    f"Use tool: {decision.use_tool}, "
+                    f"Tool: {decision.tool_name if decision.use_tool else 'N/A'}, "
+                    f"Multi-step: {decision.is_multi_step}"
+                )
+                
+                return decision
+                
+            except (ValidationError, ValueError) as validation_error:
+                logger.warning(f"Output validation failed: {validation_error}. Falling back to direct response.")
+                return AgentDecision(
+                    use_tool=False,
+                    reasoning=f"Could not parse LLM decision: {str(validation_error)}",
+                    query_type=QueryType.DIRECT
+                )
             
         except Exception as e:
             logger.warning(f"Error in decision making: {str(e)}. Defaulting to direct response.")
@@ -215,58 +240,48 @@ class AgentController:
             )
         return "\n".join(descriptions)
     
-    def _build_decision_prompt(self, query: str, tool_descriptions: str, recent_context: str = "") -> str:
-        """Build prompt for LLM to make intelligent routing decision with conversation context"""
+    def _convert_to_agent_decision(self, validated_output: ToolSelectionOutput) -> AgentDecision:
+        """
+        Convert validated Pydantic output to AgentDecision
         
-        context_section = ""
-        if recent_context:
-            context_section = f"""
-Recent Conversation Context:
-{recent_context}
-
-"""
+        Args:
+            validated_output: Validated ToolSelectionOutput from Pydantic
+            
+        Returns:
+            AgentDecision object
+        """
+        # Map query_type from Pydantic output to internal constants
+        query_type_map = {
+            "DIRECT": QueryType.DIRECT,
+            "DOCUMENT": QueryType.DOCUMENT,
+            "API": QueryType.API,
+            "MULTI_STEP": QueryType.MULTI_STEP
+        }
         
-        return f"""You are an intelligent routing agent. Analyze the user query and determine the best action.
-
-{context_section}User Query: "{query}"
-
-Available Tools:
-{tool_descriptions}
-
-Query Classification Guidelines:
-1. DIRECT RESPONSE - Simple questions that don't require external data or documents
-   Examples: "What is AI?", "Explain machine learning", "Hello", "How are you?"
-   
-2. DOCUMENT QUESTION - Questions about uploaded documents or content
-   Examples: "Summarize the contract", "What does the document say about pricing?", "Find information about deadlines in the uploaded files"
-   Tool: document_query
-   
-3. API REQUEST - Questions requiring external API data
-   Examples: "Get weather for London", "What's the Bitcoin price?", "Fetch user data"
-   Tool: api_caller
-   
-4. MULTI-STEP TASK - Complex queries requiring multiple operations
-   Examples: "Get weather and summarize it in a document", "Compare contract terms with weather impact", "Fetch data and analyze it"
-   Note: For multi-step tasks, identify the FIRST tool to use
-
-Response Format:
-- Direct response: DIRECT: [your helpful response]
-- Tool usage: TOOL: [tool_name] | PARAMS: {{"param1": "value1", "param2": "value2"}} | REASON: [brief explanation]
-
-Important:
-- Match tool parameters exactly to the tool's input schema
-- For document queries, use tool "document_query" with parameter "query"
-- For API calls, use tool "api_caller" with parameters "endpoint" and specific endpoint params
-- Be precise with parameter names and values
-
-Decision:"""
+        query_type = query_type_map.get(validated_output.query_type, QueryType.DIRECT)
+        
+        # Determine if tool should be used
+        use_tool = validated_output.selected_tool is not None and not validated_output.is_multi_step
+        
+        return AgentDecision(
+            use_tool=use_tool,
+            tool_name=validated_output.selected_tool,
+            tool_params=validated_output.tool_parameters or {},
+            reasoning=validated_output.reasoning,
+            query_type=query_type,
+            is_multi_step=validated_output.is_multi_step
+        )
     
-    def _parse_decision_response(
+    def _parse_decision_response_legacy(
         self,
         response: str,
         available_tools: Dict[str, Any]
     ) -> AgentDecision:
-        """Parse LLM decision response and classify query type"""
+        """
+        Legacy parser for decision response (kept for backward compatibility)
+        
+        NOTE: This method is deprecated. Use PromptTemplates and OutputParser instead.
+        """
         response = response.strip()
         
         if response.startswith("DIRECT:"):
