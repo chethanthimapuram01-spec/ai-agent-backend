@@ -1,6 +1,8 @@
 
 """Main FastAPI application"""
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from app.routes.health import router as health_router
 from app.routes.chat import router as chat_router
 from app.routes.agent import router as agent_router
@@ -14,6 +16,14 @@ from app.tools.tool_registry import tool_registry
 from app.tools.example_tools import CalculatorTool, TextAnalyzerTool
 from app.tools.api_caller_tool import ApiCallerTool
 from app.tools.document_query_tool import DocumentQueryTool
+from app.utils.error_handlers import (
+    AppException,
+    exception_to_response,
+    create_error_response,
+    ErrorCode,
+    ErrorCategory,
+    log_error
+)
 import logging
 
 # Configure logging
@@ -29,6 +39,57 @@ app = FastAPI(
     description="Backend service for AI agents with tool orchestration",
     version="1.0.0"
 )
+
+
+# Global exception handlers
+@app.exception_handler(AppException)
+async def app_exception_handler(request: Request, exc: AppException):
+    """
+    Global handler for custom AppException errors
+    
+    Converts AppException to structured JSON response
+    """
+    log_error(exc, context={"path": request.url.path, "method": request.method})
+    return JSONResponse(
+        status_code=exc.http_status,
+        content=exc.to_dict()
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Handle Pydantic validation errors
+    
+    Converts validation errors to structured format
+    """
+    logger.warning(f"Validation error on {request.url.path}: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content=create_error_response(
+            error_code=ErrorCode.INVALID_INPUT,
+            message="Request validation failed",
+            category=ErrorCategory.VALIDATION,
+            details={
+                "validation_errors": exc.errors(),
+                "body": str(exc.body) if hasattr(exc, "body") else None
+            }
+        )
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """
+    Catch-all handler for unexpected exceptions
+    
+    Logs error and returns generic error response
+    """
+    log_error(exc, context={"path": request.url.path, "method": request.method})
+    return JSONResponse(
+        status_code=500,
+        content=exception_to_response(exc)
+    )
 
 
 @app.on_event("startup")

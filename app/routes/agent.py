@@ -1,8 +1,18 @@
 """Agent endpoint for intelligent query processing"""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 from app.agents.agent_controller import agent_controller
+from app.utils.error_handlers import (
+    AppException,
+    MissingSessionIdError,
+    ValidationError,
+    validate_session_id,
+    validate_non_empty_text,
+    exception_to_response,
+    log_error
+)
 
 router = APIRouter()
 
@@ -40,39 +50,57 @@ async def process_agent_query(request: AgentRequest):
         
     Returns:
         AgentResponse with the agent's response and execution details
+        
+    Raises:
+        ValidationError: If query or session_id is invalid
     """
-    if not request.query or not request.query.strip():
-        raise HTTPException(status_code=400, detail="Query cannot be empty")
-    
-    if not request.session_id or not request.session_id.strip():
-        raise HTTPException(status_code=400, detail="Session ID cannot be empty")
-    
-    # Process through agent controller
-    result = await agent_controller.process_query(
-        query=request.query,
-        session_id=request.session_id,
-        context=request.context
-    )
-    
-    # Format decision for response
-    decision_info = None
-    if result.get("decision"):
-        decision = result["decision"]
-        decision_info = {
-            "use_tool": decision.use_tool,
-            "tool_name": decision.tool_name,
-            "reasoning": decision.reasoning,
-            "timestamp": decision.timestamp
+    try:
+        # Validate inputs
+        validate_non_empty_text(request.query, "query")
+        validate_session_id(request.session_id)
+        
+        # Process through agent controller
+        result = await agent_controller.process_query(
+            query=request.query,
+            session_id=request.session_id,
+            context=request.context
+        )
+        
+        # Format decision for response
+        decision_info = None
+        if result.get("decision"):
+            decision = result["decision"]
+            decision_info = {
+                "use_tool": decision.use_tool,
+                "tool_name": decision.tool_name,
+                "reasoning": decision.reasoning,
+                "timestamp": decision.timestamp
+            }
+        
+        return {
+            "response": result["response"],
+            "session_id": result["session_id"],
+            "timestamp": result["timestamp"],
+            "success": result["success"],
+            "decision": decision_info,
+            "tool_results": result.get("tool_results")
         }
     
-    return {
-        "response": result["response"],
-        "session_id": result["session_id"],
-        "timestamp": result["timestamp"],
-        "success": result["success"],
-        "decision": decision_info,
-        "tool_results": result.get("tool_results")
-    }
+    except AppException as e:
+        # Convert custom exception to structured error response
+        log_error(e, context={"endpoint": "/agent", "session_id": request.session_id})
+        raise HTTPException(
+            status_code=e.http_status,
+            detail=e.to_dict()
+        )
+    
+    except Exception as e:
+        # Handle unexpected errors
+        log_error(e, context={"endpoint": "/agent", "session_id": request.session_id})
+        raise HTTPException(
+            status_code=500,
+            detail=exception_to_response(e)
+        )
 
 
 @router.get("/agent/history/{session_id}")

@@ -1,7 +1,19 @@
 """Base tool interface for all agent tools"""
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
+import logging
 from pydantic import BaseModel, Field
+from app.utils.error_handlers import (
+    ToolError,
+    ToolValidationError,
+    ToolTimeoutError,
+    log_error,
+    create_error_response,
+    ErrorCode,
+    ErrorCategory
+)
+
+logger = logging.getLogger(__name__)
 
 
 class ToolMetadata(BaseModel):
@@ -49,33 +61,63 @@ class BaseTool(ABC):
         """
         pass
     
-    def validate_input(self, **kwargs) -> tuple[bool, Optional[str]]:
+    def validate_input(self, **kwargs) -> None:
         """
         Validate input parameters against the tool's schema
         
         Args:
             **kwargs: Input parameters to validate
             
-        Returns:
-            Tuple of (is_valid, error_message)
+        Raises:
+            ToolValidationError: If validation fails
         """
         required_params = self.metadata.input_schema.get("required", [])
         properties = self.metadata.input_schema.get("properties", {})
+        validation_errors = {}
         
         # Check required parameters
         for param in required_params:
-            if param not in kwargs:
-                return False, f"Missing required parameter: {param}"
+            if param not in kwargs or kwargs[param] is None:
+                validation_errors[param] = f"Required parameter '{param}' is missing"
         
-        # Check parameter types
+        # Check parameter types and constraints
         for param, value in kwargs.items():
             if param in properties:
-                expected_type = properties[param].get("type")
-                if expected_type:
-                    if not self._check_type(value, expected_type):
-                        return False, f"Parameter '{param}' has incorrect type. Expected: {expected_type}"
+                prop_schema = properties[param]
+                expected_type = prop_schema.get("type")
+                
+                # Type validation
+                if expected_type and not self._check_type(value, expected_type):
+                    validation_errors[param] = f"Expected type '{expected_type}', got '{type(value).__name__}'"
+                
+                # String length validation
+                if expected_type == "string" and isinstance(value, str):
+                    min_length = prop_schema.get("minLength")
+                    max_length = prop_schema.get("maxLength")
+                    if min_length and len(value) < min_length:
+                        validation_errors[param] = f"String length must be at least {min_length}"
+                    if max_length and len(value) > max_length:
+                        validation_errors[param] = f"String length must not exceed {max_length}"
+                
+                # Number range validation
+                if expected_type in ["number", "integer"] and isinstance(value, (int, float)):
+                    minimum = prop_schema.get("minimum")
+                    maximum = prop_schema.get("maximum")
+                    if minimum is not None and value < minimum:
+                        validation_errors[param] = f"Value must be at least {minimum}"
+                    if maximum is not None and value > maximum:
+                        validation_errors[param] = f"Value must not exceed {maximum}"
+                
+                # Enum validation
+                enum_values = prop_schema.get("enum")
+                if enum_values and value not in enum_values:
+                    validation_errors[param] = f"Value must be one of {enum_values}"
         
-        return True, None
+        if validation_errors:
+            raise ToolValidationError(
+                tool_name=self.metadata.name,
+                validation_errors=validation_errors
+            )
     
     def _check_type(self, value: Any, expected_type: str) -> bool:
         """
@@ -105,29 +147,60 @@ class BaseTool(ABC):
     
     async def safe_execute(self, **kwargs) -> Dict[str, Any]:
         """
-        Execute the tool with validation and error handling
+        Safely execute the tool with validation and error handling
         
         Args:
             **kwargs: Input parameters
             
         Returns:
-            Dictionary with execution results
+            Dictionary containing execution results or structured error information
         """
-        # Validate input
-        is_valid, error_msg = self.validate_input(**kwargs)
-        if not is_valid:
+        try:
+            # Validate input
+            self.validate_input(**kwargs)
+            
+            # Execute tool
+            result = await self.execute(**kwargs)
+            
+            # Ensure result has correct structure
+            if not isinstance(result, dict):
+                logger.warning(f"Tool {self.metadata.name} returned non-dict result, wrapping it")
+                result = {"success": True, "result": result}
+            
+            if "success" not in result:
+                result["success"] = True
+            
+            return result
+            
+        except ToolValidationError as e:
+            # Input validation failed
+            log_error(e, context={"tool": self.metadata.name, "inputs": kwargs})
             return {
                 "success": False,
-                "result": None,
-                "error": f"Input validation failed: {error_msg}"
+                "error": e.message,
+                "error_code": e.error_code.value,
+                "details": e.details,
+                "result": None
             }
         
-        # Execute tool
-        try:
-            return await self.execute(**kwargs)
-        except Exception as e:
+        except ToolError as e:
+            # Tool-specific error
+            log_error(e, context={"tool": self.metadata.name, "inputs": kwargs})
             return {
                 "success": False,
-                "result": None,
-                "error": f"Tool execution failed: {str(e)}"
+                "error": e.message,
+                "error_code": e.error_code.value,
+                "details": e.details,
+                "result": None
+            }
+        
+        except Exception as e:
+            # Unexpected error
+            log_error(e, context={"tool": self.metadata.name, "inputs": kwargs})
+            return {
+                "success": False,
+                "error": f"Tool execution failed: {str(e)}",
+                "error_code": ErrorCode.TOOL_EXECUTION_FAILED.value,
+                "details": {"exception_type": type(e).__name__},
+                "result": None
             }

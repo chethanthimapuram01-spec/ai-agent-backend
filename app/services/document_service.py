@@ -14,6 +14,17 @@ from docx import Document
 from app.services.embedding_service import embedding_service
 from app.services.vector_store_service import vector_store_service
 
+# Import error handlers
+from app.utils.error_handlers import (
+    DocumentError,
+    DocumentNotFoundError,
+    InvalidFileFormatError,
+    EmptyDocumentError,
+    validate_file_format,
+    validate_non_empty_text,
+    log_error
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,25 +84,29 @@ class DocumentService:
         
         logger.info(f"DocumentService initialized with upload directory: {self.upload_dir}")
     
-    def validate_file_extension(self, filename: str) -> tuple[bool, Optional[str]]:
+    def validate_file_extension(self, filename: str) -> None:
         """
         Validate if file extension is supported
         
         Args:
             filename: Name of the file
             
-        Returns:
-            Tuple of (is_valid, error_message)
+        Raises:
+            InvalidFileFormatError: If file format is not supported
         """
         file_ext = Path(filename).suffix.lower()
         
         if not file_ext:
-            return False, "File has no extension"
+            raise InvalidFileFormatError(
+                file_format="no extension",
+                supported_formats=list(self.SUPPORTED_EXTENSIONS)
+            )
         
         if file_ext not in self.SUPPORTED_EXTENSIONS:
-            return False, f"Unsupported file type. Supported: {', '.join(self.SUPPORTED_EXTENSIONS)}"
-        
-        return True, None
+            raise InvalidFileFormatError(
+                file_format=file_ext,
+                supported_formats=list(self.SUPPORTED_EXTENSIONS)
+            )
     
     def generate_unique_filename(self, original_filename: str) -> str:
         """

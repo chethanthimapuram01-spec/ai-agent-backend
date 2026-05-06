@@ -2,6 +2,14 @@
 import httpx
 from typing import Dict, Any, Optional
 from app.tools.base_tool import BaseTool, ToolMetadata
+from app.utils.error_handlers import (
+    APIError,
+    APITimeoutError,
+    APIRateLimitError,
+    retry_on_exception,
+    log_error,
+    ToolError
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -201,9 +209,16 @@ class ApiCallerTool(BaseTool):
                 "uv_index": current.get("uvIndex")
             }
     
+    @retry_on_exception(
+        max_attempts=3,
+        delay=0.5,
+        backoff=2.0,
+        exceptions=(httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError),
+        logger_func=logger.warning
+    )
     async def _call_placeholder_api(self, resource: str, resource_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Call JSONPlaceholder API
+        Call JSONPlaceholder API with retry logic
         
         Args:
             resource: Type of resource (posts, users, comments, etc.)
@@ -211,6 +226,10 @@ class ApiCallerTool(BaseTool):
             
         Returns:
             Data from JSONPlaceholder API
+            
+        Raises:
+            APITimeoutError: If request times out
+            APIError: If API call fails
         """
         base_url = "https://jsonplaceholder.typicode.com"
         
@@ -219,34 +238,66 @@ class ApiCallerTool(BaseTool):
         else:
             url = f"{base_url}/{resource}"
         
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            data = response.json()
-            
-            # Normalize response
-            if isinstance(data, list):
-                return {
-                    "resource": resource,
-                    "count": len(data),
-                    "items": data[:5] if len(data) > 5 else data  # Limit to first 5 items
-                }
-            else:
-                return {
-                    "resource": resource,
-                    "id": resource_id,
-                    "data": data
-                }
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url)
+                
+                if response.status_code == 429:
+                    raise APIRateLimitError(endpoint=url)
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                # Normalize response
+                if isinstance(data, list):
+                    return {
+                        "resource": resource,
+                        "count": len(data),
+                        "items": data[:5] if len(data) > 5 else data  # Limit to first 5 items
+                    }
+                else:
+                    return {
+                        "resource": resource,
+                        "id": resource_id,
+                        "data": data
+                    }
+        
+        except httpx.TimeoutException as e:
+            raise APITimeoutError(endpoint=url, timeout=10.0) from e
+        except httpx.HTTPStatusError as e:
+            raise APIError(
+                message=f"Placeholder API request failed: {e.response.status_code}",
+                endpoint=url,
+                details={"status_code": e.response.status_code}
+            ) from e
+        except Exception as e:
+            if not isinstance(e, (APIError, APITimeoutError, APIRateLimitError)):
+                raise APIError(
+                    message=f"Placeholder API call failed: {str(e)}",
+                    endpoint=url
+                ) from e
+            raise
     
+    @retry_on_exception(
+        max_attempts=3,
+        delay=0.5,
+        backoff=2.0,
+        exceptions=(httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError),
+        logger_func=logger.warning
+    )
     async def _call_crypto_api(self, crypto_id: str) -> Dict[str, Any]:
         """
-        Call CoinGecko API for cryptocurrency prices
+        Call CoinGecko API for cryptocurrency prices with retry logic
         
         Args:
             crypto_id: Cryptocurrency identifier (e.g., 'bitcoin', 'ethereum')
             
         Returns:
             Cryptocurrency price data
+            
+        Raises:
+            APITimeoutError: If request times out
+            APIError: If API call fails
         """
         url = "https://api.coingecko.com/api/v3/simple/price"
         params = {
@@ -256,25 +307,46 @@ class ApiCallerTool(BaseTool):
             "include_market_cap": "true"
         }
         
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            if crypto_id not in data:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params)
+                
+                if response.status_code == 429:
+                    raise APIRateLimitError(endpoint=url)
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                if crypto_id not in data:
+                    return {
+                        "cryptocurrency": crypto_id,
+                        "error": "Cryptocurrency not found",
+                        "available_ids_hint": "Try: bitcoin, ethereum, cardano, solana, dogecoin"
+                    }
+                
+                crypto_data = data[crypto_id]
+                
                 return {
                     "cryptocurrency": crypto_id,
-                    "error": "Cryptocurrency not found",
-                    "available_ids_hint": "Try: bitcoin, ethereum, cardano, solana, dogecoin"
+                    "price_usd": crypto_data.get("usd"),
+                    "price_eur": crypto_data.get("eur"),
+                    "price_inr": crypto_data.get("inr"),
+                    "change_24h_usd": crypto_data.get("usd_24h_change"),
+                    "market_cap_usd": crypto_data.get("usd_market_cap")
                 }
-            
-            crypto_data = data[crypto_id]
-            
-            return {
-                "cryptocurrency": crypto_id,
-                "price_usd": crypto_data.get("usd"),
-                "price_eur": crypto_data.get("eur"),
-                "price_inr": crypto_data.get("inr"),
-                "change_24h_usd": crypto_data.get("usd_24h_change"),
-                "market_cap_usd": crypto_data.get("usd_market_cap")
-            }
+        
+        except httpx.TimeoutException as e:
+            raise APITimeoutError(endpoint=url, timeout=10.0) from e
+        except httpx.HTTPStatusError as e:
+            raise APIError(
+                message=f"Crypto API request failed: {e.response.status_code}",
+                endpoint=url,
+                details={"status_code": e.response.status_code}
+            ) from e
+        except Exception as e:
+            if not isinstance(e, (APIError, APITimeoutError, APIRateLimitError)):
+                raise APIError(
+                    message=f"Crypto API call failed: {str(e)}",
+                    endpoint=url
+                ) from e
+            raise
