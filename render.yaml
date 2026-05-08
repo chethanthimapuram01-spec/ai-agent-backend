@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: ai-agent-backend
+    env: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ENVIRONMENT
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        fromGroup: web
+    healthCheckPath: /health
+    autoDeploy: true
+
+databases:
+  - name: ai-agent-db
+    plan: starter
+    databaseName: agent_data
+    user: agent_user
