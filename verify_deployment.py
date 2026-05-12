@@ -29,17 +29,17 @@ def print_header(text):
 
 def print_success(text):
     """Print success message"""
-    print(f"{Colors.GREEN}✓ {text}{Colors.END}")
+    print(f"{Colors.GREEN}[OK] {text}{Colors.END}")
 
 
 def print_warning(text):
     """Print warning message"""
-    print(f"{Colors.YELLOW}⚠ {text}{Colors.END}")
+    print(f"{Colors.YELLOW}[WARN] {text}{Colors.END}")
 
 
 def print_error(text):
     """Print error message"""
-    print(f"{Colors.RED}✗ {text}{Colors.END}")
+    print(f"{Colors.RED}[ERROR] {text}{Colors.END}")
 
 
 def check_file_exists(filepath, required=True):
@@ -255,7 +255,7 @@ def check_app_structure():
 def main():
     """Run all checks"""
     print(f"\n{Colors.BOLD}{'='*60}")
-    print("🚀 Pre-Deployment Verification")
+    print("Pre-Deployment Verification")
     print(f"{'='*60}{Colors.END}\n")
     
     checks = [
@@ -291,10 +291,10 @@ def main():
     print(f"\n{Colors.BOLD}Results: {passed}/{total} checks passed{Colors.END}\n")
     
     if passed == total:
-        print_success("✓ All checks passed! Ready for deployment.\n")
+        print_success("All checks passed! Ready for deployment.\n")
         return 0
     else:
-        print_warning("⚠ Some checks failed. Please fix issues before deploying.\n")
+        print_warning("Some checks failed. Please fix issues before deploying.\n")
         return 1
 
 
